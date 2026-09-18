@@ -97,6 +97,14 @@ adaptador muda**. A dependência ausente do fork
 (`@boruto_vk7/libsignal-node`) é suprida no `package.json` por alias npm
 (`npm:@itsukichan/libsignal-node`), sem scripts de pós-instalação.
 
+O adaptador também aplica patches de compatibilidade no fork congelado: o
+servidor do WhatsApp passou a exigir o campo `version` no `DeviceProps` do
+registro para aceitar sessões de Pairing Code (o Baileys mantido envia; o
+fork, não). O patch substitui `generateRegistrationNode` no módulo
+`Utils/validate-connection.js` do fork — como `Socket/socket.js` resolve a
+função pelo getter vivo do barrel em tempo de chamada, a correção vale sem
+alterar nenhum arquivo da biblioteca.
+
 ### Cache como base dos dois métodos
 
 O WhatsApp não reentrega conteúdo View Once; por isso cada VO recebida é

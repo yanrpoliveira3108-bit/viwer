@@ -515,29 +515,39 @@ export class Connection {
     try {
       if (this.auth.state.creds.registered) return
       const attrs = stanza?.attrs ?? {}
-      const children = Array.isArray(stanza?.content) ? stanza.content.map((c) => c?.tag) : []
-      const summary = `iq type=${attrs.type ?? '?'} filhos=[${children.join(',') || 'vazio'}]`
+      const children = Array.isArray(stanza?.content) ? stanza.content : []
+      // Resumo com atributos dos filhos: o código do erro fica no nó
+      // <error code="..." text="..."/>, não nos atributos do IQ.
+      const childSummary =
+        children
+          .map((c) => {
+            const a = Object.entries(c?.attrs ?? {})
+              .map(([k, v]) => `${k}=${v}`)
+              .join(' ')
+            return a ? `${c?.tag}(${a})` : c?.tag
+          })
+          .join(', ') || 'vazio'
 
-      if (attrs.type === 'error' || attrs.error) {
-        log.warn(`servidor RECUSOU ${summary}${attrs.error ? ` (erro=${attrs.error})` : ''}`)
+      if (attrs.type === 'error' || children.some((c) => c?.tag === 'error')) {
+        log.warn(`servidor RECUSOU pareamento: ${childSummary}`)
         return
       }
-      if (children.includes('pair-device')) {
+      if (children.some((c) => c?.tag === 'pair-device')) {
         log.info('registro aceito pelo servidor')
         this.#resolveRegistrationAck()
         return
       }
-      if (children.includes('link_code_companion_reg')) {
-        log.info(`servidor respondeu ao pareamento (${summary})`)
+      if (children.some((c) => c?.tag === 'link_code_companion_reg')) {
+        log.info(`servidor respondeu ao pareamento: ${childSummary}`)
         this.#resolveRegistrationAck()
         return
       }
-      if (children.includes('pair-success')) {
+      if (children.some((c) => c?.tag === 'pair-success')) {
         log.info('pareamento confirmado pelo servidor')
         return
       }
       if (attrs.type === 'result') {
-        log.info(`servidor confirmou ${summary}`)
+        log.info(`servidor confirmou iq (${childSummary})`)
       }
     } catch {
       /* diagnóstico nunca pode quebrar o pareamento */

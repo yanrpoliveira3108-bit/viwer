@@ -38,6 +38,84 @@ const ENTRY_CANDIDATES = [
 let cached = null
 
 /**
+ * Versão do "aplicativo acompanhante" anunciada no DeviceProps durante o
+ * registro. O servidor do WhatsApp passou a exigir esse campo para aceitar
+ * sessões de Pairing Code; o Baileys mantido (WhiskeySockets) o envia, mas
+ * o fork oficial do projeto congelou antes dessa mudança. Valores mantidos
+ * em sincronia com o Baileys mantido.
+ */
+const COMPANION_DEVICE_VERSION = { primary: 10, secondary: 15, tertiary: 7 }
+
+/** Patches de compatibilidade já aplicados? */
+let patchesApplied = false
+
+/**
+ * Aplica correções de compatibilidade no fork congelado.
+ *
+ * O módulo `Socket/socket.js` resolve `Utils.generateRegistrationNode` por
+ * acesso a propriedade em tempo de chamada (getter vivo no barrel), então
+ * substituir a função no módulo `Utils/validate-connection.js` altera o nó
+ * de registro enviado ao servidor — sem tocar nos arquivos da biblioteca.
+ *
+ * @param {object} apiObj API da biblioteca já carregada.
+ */
+function applyCompatibilityPatches(apiObj) {
+  if (patchesApplied) return
+  patchesApplied = true
+
+  try {
+    const barrelCandidates = [
+      `${BAILEYS_PACKAGE}/baileys/lib/Utils/index.js`,
+      `${BAILEYS_PACKAGE}/lib/Utils/index.js`,
+    ]
+    const validateCandidates = [
+      `${BAILEYS_PACKAGE}/baileys/lib/Utils/validate-connection.js`,
+      `${BAILEYS_PACKAGE}/lib/Utils/validate-connection.js`,
+    ]
+
+    let barrel = null
+    let validateModule = null
+    for (const [index, candidate] of barrelCandidates.entries()) {
+      try {
+        // O barrel PRECISA ser carregado antes do patch (os getters vivos
+        // só existem depois que ele materializa as reexportações).
+        barrel = require(require.resolve(candidate))
+        validateModule = require(require.resolve(validateCandidates[index]))
+        break
+      } catch {
+        /* tenta o próximo layout */
+      }
+    }
+    if (!barrel || !validateModule) return
+
+    const original = validateModule.generateRegistrationNode
+    if (typeof original !== 'function') return
+
+    validateModule.generateRegistrationNode = (signalCreds, config) => {
+      const node = original(signalCreds, config)
+      try {
+        const pairingData = node?.devicePairingData
+        if (pairingData?.deviceProps && apiObj?.proto?.DeviceProps) {
+          const props = apiObj.proto.DeviceProps.decode(pairingData.deviceProps)
+          props.version = { ...COMPANION_DEVICE_VERSION }
+          pairingData.deviceProps = apiObj.proto.DeviceProps.encode(props).finish()
+        }
+      } catch {
+        /* sem o campo version segue o fluxo original (telemetria acusa) */
+      }
+      return node
+    }
+
+    // Confirma que o barrel enxerga a função substituída.
+    if (barrel.generateRegistrationNode !== validateModule.generateRegistrationNode) {
+      validateModule.generateRegistrationNode = original
+    }
+  } catch {
+    /* patch é otimização de compatibilidade; nunca impede a inicialização */
+  }
+}
+
+/**
  * Carrega (uma única vez) a biblioteca Baileys oficial do projeto.
  *
  * @returns {object} Módulo exportado pela biblioteca.
@@ -53,6 +131,7 @@ export function getBaileys() {
 
       const api = require(resolved)
       cached = { api: api.default ? { ...api, default: api.default } : api, entry: resolved }
+      applyCompatibilityPatches(cached.api)
       return cached.api
     } catch (error) {
       errors.push(`${candidate}: ${error.message}`)
