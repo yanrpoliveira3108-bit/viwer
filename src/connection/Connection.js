@@ -34,17 +34,32 @@ const MAX_PAIRING_ATTEMPTS = 3
 /** Espera para o handshake de registro terminar antes do pedido de código. */
 const PAIRING_GRACE_MS = 1500
 
-/** Fontes da versão mais recente do WhatsApp, em ordem de preferência. */
+/**
+ * Fontes da versão mais recente do WhatsApp, em ordem de preferência.
+ *
+ * IMPORTANTE: o servidor do WhatsApp rejeita versões defasadas (erro 405).
+ * A fonte do fork (Itsukichann) está congelada, por isso a fonte mantida
+ * ativamente (WhiskeySockets) vem primeiro; o endpoint oficial do
+ * WhatsApp Web cobre bloqueios ao GitHub.
+ */
 const VERSION_SOURCES = [
+  {
+    name: 'repositório mantido',
+    url: 'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/baileys-version.json',
+    extract: (data) => JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')).version,
+  },
+  {
+    name: 'atualização oficial do WhatsApp Web',
+    url: 'https://web.whatsapp.com/check-update?version=2.3000.1000000000&platform=web',
+    extract: (data) =>
+      String(data?.currentVersion ?? '')
+        .split('.')
+        .map(Number),
+  },
   {
     name: 'fork oficial',
     url: 'https://raw.githubusercontent.com/Itsukichann/Baileys/refs/heads/master/lib/Defaults/baileys-version.json',
     extract: (data) => data?.version,
-  },
-  {
-    name: 'repositório base',
-    url: 'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/baileys-version.json',
-    extract: (data) => JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')).version,
   },
 ]
 
@@ -156,24 +171,33 @@ export class Connection {
 
   /**
    * Resolve a versão do WhatsApp a ser anunciada ao servidor.
-   * Cadeia: fontes remotas (atualizadas) → versão embutida na biblioteca.
-   * Cada passo é registrado em log; nunca interrompe a inicialização.
+   * Consulta todas as fontes em paralelo e usa a MAIOR versão válida
+   * (o servidor rejeita versões defasadas — erro 405). Se nada estiver
+   * acessível, usa a versão embutida na biblioteca com aviso.
+   * Cada decisão é registrada em log; nunca interrompe a inicialização.
    */
   async #resolveWaVersion() {
-    for (const source of VERSION_SOURCES) {
-      try {
+    const results = await Promise.allSettled(
+      VERSION_SOURCES.map(async (source) => {
         const response = await fetch(source.url, { signal: AbortSignal.timeout(8000) })
-        if (!response.ok) continue
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const version = isValidWaVersion(source.extract(await response.json()))
-        if (version) {
-          this.waVersion = version.join('.')
-          this.waVersionSource = source.name
-          log.info(`versão do WhatsApp: ${this.waVersion} (${source.name})`)
-          return
-        }
-      } catch {
-        log.debug(`fonte de versão indisponível: ${source.name}`)
-      }
+        if (!version) throw new Error('formato inesperado')
+        return { source: source.name, version }
+      })
+    )
+
+    let best = null
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue
+      if (!best || result.value.version[2] > best.version[2]) best = result.value
+    }
+
+    if (best) {
+      this.waVersion = best.version.join('.')
+      this.waVersionSource = best.source
+      log.info(`versão do WhatsApp: ${this.waVersion} (${best.source})`)
+      return
     }
 
     const bundled = isValidWaVersion(getBundledWaVersion())
@@ -182,7 +206,7 @@ export class Connection {
       this.waVersionSource = 'embalada na biblioteca'
       log.warn(
         `sem acesso às versões atualizadas — usando a versão embutida (${this.waVersion}). ` +
-          'Se a conexão for recusada pelo WhatsApp, verifique sua internet.'
+          'Se a conexão for recusada pelo WhatsApp (405), verifique sua internet.'
       )
       return
     }

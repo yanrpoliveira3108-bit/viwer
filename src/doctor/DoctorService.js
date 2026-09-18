@@ -310,8 +310,9 @@ export class DoctorService {
    */
   async #checkWaVersion() {
     const sources = [
-      'https://raw.githubusercontent.com/Itsukichann/Baileys/refs/heads/master/lib/Defaults/baileys-version.json',
       'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/baileys-version.json',
+      'https://web.whatsapp.com/check-update?version=2.3000.1000000000&platform=web',
+      'https://raw.githubusercontent.com/Itsukichann/Baileys/refs/heads/master/lib/Defaults/baileys-version.json',
     ]
     for (const url of sources) {
       try {
