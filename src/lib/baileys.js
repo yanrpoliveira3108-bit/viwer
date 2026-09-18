@@ -175,6 +175,12 @@ export function getBaileys() {
     console.log(
       `[VIEWER] aviso: patches de pareamento não aplicados: ${patchResult.failed.join(', ')}`
     )
+  } else {
+    const status = (name) => (patchResult.patched.includes(name) ? 'aplicado agora' : 'já presente')
+    console.log(
+      `[VIEWER] patches de pareamento na biblioteca: ` +
+        `guard=${status('guard link_code_companion_reg')}, refresh=${status('companion_reg_refresh')}`
+    )
   }
 
   const errors = []

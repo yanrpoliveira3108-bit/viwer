@@ -352,16 +352,11 @@ export class Connection {
       this.auth.state.creds.me = undefined
     }
 
-    // browser[1] precisa ser um nome de plataforma conhecido do protocolo
-    // (o fork converte em DeviceProps.PlatformType; "Viewer" viraria
-    // UNKNOWN). Mantém identificação neutra e compatível.
-    const browser = this.config.get('connection.browser')
     this.sock = makeWASocket({
       auth: this.auth.state,
       logger: quietLogger,
       printQRInTerminal: false,
-      browser:
-        Array.isArray(browser) && browser.length === 3 ? browser : ['Ubuntu', 'Chrome', '120.0.0'],
+      browser: this.#canonicalBrowser(),
       markOnlineOnConnect: this.config.get('connection.markOnlineOnConnect'),
       syncFullHistory: this.config.get('connection.syncFullHistory'),
       version: this.waVersion ? this.waVersion.split('.').map(Number) : undefined,
@@ -511,6 +506,35 @@ export class Connection {
       clearTimeout(this.pairingExpiryTimer)
       this.pairingExpiryTimer = null
     }
+  }
+
+  /**
+   * Tripleto de navegador canônico para o pareamento.
+   *
+   * O servidor do WhatsApp rejeita o pedido de pareamento com 400 quando o
+   * `companion_platform_id` não é um navegador (Chrome..Edge) OU quando o
+   * `companion_platform_display` usa um nome de sistema fora do padrão —
+   * e o fork monta o display como `navegador (sistema)`. Por isso o sistema
+   * é normalizado para 'Mac OS'/'Windows' e o navegador para um nome
+   * conhecido do protocolo (correção equivalente ao Baileys PR #2409).
+   * @returns {[string, string, string]}
+   */
+  #canonicalBrowser() {
+    const CANONICAL_OS = ['Mac OS', 'Windows']
+    const KNOWN_BROWSERS = ['Chrome', 'Firefox', 'IE', 'Opera', 'Safari', 'Edge']
+    const configured = this.config.get('connection.browser')
+    const triple =
+      Array.isArray(configured) && configured.length === 3
+        ? configured.map(String)
+        : ['Mac OS', 'Chrome', '120.0.0']
+
+    const os = CANONICAL_OS.includes(triple[0]) ? triple[0] : 'Mac OS'
+    const browserName = KNOWN_BROWSERS.includes(triple[1]) ? triple[1] : 'Chrome'
+    const canonical = [os, browserName, triple[2]]
+    if (os !== triple[0] || browserName !== triple[1]) {
+      log.info(`identidade de pareamento ajustada para "${browserName} (${os})"`)
+    }
+    return canonical
   }
 
   /** Registra os eventos do socket atual. */
