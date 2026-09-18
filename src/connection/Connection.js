@@ -41,6 +41,24 @@ const POST_ACK_SETTLE_MS = 500
 /** Validade aproximada do código exibido pelo WhatsApp no celular. */
 const PAIRING_CODE_TTL_MS = 70000
 
+/** Espera inicial quando o servidor limita tentativas de pareamento (429). */
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000
+
+/** Espera máxima quando o limite se repete (1 hora). */
+const RATE_LIMIT_COOLDOWN_MAX_MS = 60 * 60 * 1000
+
+/**
+ * Escala a espera quando o limite de tentativas (429) se repete:
+ * 5min → 15min → 45min → 60min (teto). Insistir sem espera só aumenta
+ * o bloqueio no servidor.
+ * @param {number} previousMs Espera anterior (0 = primeira ocorrência).
+ * @returns {number} Próxima espera em ms.
+ */
+export function nextRateLimitCooldownMs(previousMs) {
+  if (!previousMs) return RATE_LIMIT_COOLDOWN_MS
+  return Math.min(previousMs * 3, RATE_LIMIT_COOLDOWN_MAX_MS)
+}
+
 /**
  * Normaliza um número de telefone brasileiro para o formato internacional
  * exigido pelo pareamento (somente dígitos, DDI + DDD + número).
@@ -187,6 +205,12 @@ export class Connection {
     this.registrationAcked = false
     /** @type {Array<() => void>} Resolvedores aguardando o reconhecimento. */
     this.regAckWaiters = []
+    /** Até quando o pareamento está suspenso por limite do servidor (429). */
+    this.rateLimitedUntil = 0
+    /** Espera atual do limite de tentativas (escala a cada reincidência). */
+    this.rateLimitCooldownMs = 0
+    /** @type {NodeJS.Timeout|null} Timer de retomada após o limite. */
+    this.rateLimitTimer = null
   }
 
   /** @returns {object|null} Socket conectado (ou em conexão). */
@@ -351,7 +375,11 @@ export class Connection {
 
     // Pareamento: dispara para cada socket novo enquanto não registrado.
     if (!this.auth.state.creds.registered && this.pairingPhone) {
-      void this.#attemptPairing()
+      if (Date.now() < this.rateLimitedUntil) {
+        log.info('aguardando fim do limite de tentativas antes de pedir novo código')
+      } else {
+        void this.#attemptPairing()
+      }
     }
   }
 
@@ -528,8 +556,10 @@ export class Connection {
           })
           .join(', ') || 'vazio'
 
-      if (attrs.type === 'error' || children.some((c) => c?.tag === 'error')) {
+      const errorChild = children.find((c) => c?.tag === 'error')
+      if (attrs.type === 'error' || errorChild) {
         log.warn(`servidor RECUSOU pareamento: ${childSummary}`)
+        if (String(errorChild?.attrs?.code) === '429') this.#enterRateLimitCooldown()
         return
       }
       if (children.some((c) => c?.tag === 'pair-device')) {
@@ -559,6 +589,51 @@ export class Connection {
     if (this.registrationAcked) return
     this.registrationAcked = true
     for (const resolve of this.regAckWaiters.splice(0)) resolve()
+  }
+
+  /**
+   * Suspende o pareamento quando o servidor responde 429 (rate-overlimit).
+   * Novos pedidos de código só pioram o bloqueio: o Viewer espera e tenta
+   * de novo sozinho, com espera crescente a cada reincidência.
+   */
+  #enterRateLimitCooldown() {
+    if (this.rateLimitTimer) return // já em espera
+    this.#clearPairingExpiry()
+    this.pairingAttempts = 0
+    this.rateLimitCooldownMs = nextRateLimitCooldownMs(this.rateLimitCooldownMs)
+    this.rateLimitedUntil = Date.now() + this.rateLimitCooldownMs
+    const minutes = Math.round(this.rateLimitCooldownMs / 60000)
+    log.warn(
+      `o WhatsApp LIMITOU as tentativas de pareamento deste número (erro 429). ` +
+        `Nenhuma nova tentativa será feita por ${minutes} min.`
+    )
+    log.warn(
+      'não tente novamente nesse período — insistir aumenta o bloqueio. ' +
+        'O Viewer tenta de novo sozinho ao fim da espera.'
+    )
+    // O código em exibição está morto; retira do painel.
+    bus.emit(EVENTS.CONNECTION_PAIRING, { code: null, phone: null })
+    this.rateLimitTimer = setTimeout(() => {
+      this.rateLimitTimer = null
+      void this.#retryPairingAfterCooldown()
+    }, this.rateLimitCooldownMs)
+  }
+
+  /** Tenta o pareamento novamente ao fim da espera do limite. */
+  async #retryPairingAfterCooldown() {
+    if (this.auth?.state?.creds?.registered || this.state === 'open') return
+    this.rateLimitedUntil = 0
+    log.info('fim da espera do limite de tentativas — pedindo novo código')
+    this.codePublishedForSocket = null // permite novo pedido no socket atual
+    void this.#attemptPairing()
+  }
+
+  /** Cancela o timer de retomada pós-limite. */
+  #clearRateLimitTimer() {
+    if (this.rateLimitTimer) {
+      clearTimeout(this.rateLimitTimer)
+      this.rateLimitTimer = null
+    }
   }
 
   /**
@@ -592,6 +667,7 @@ export class Connection {
     if (connection === 'open') {
       this.attempts = 0
       this.pairingAttempts = 0
+      this.rateLimitCooldownMs = 0 // limite superado com sucesso
       this.#clearPairingExpiry()
       this.#setState('open')
       log.info(t('app.connected'))
@@ -640,8 +716,10 @@ export class Connection {
         }
         break
 
-      default:
-        log.info(`${t('app.disconnected')} (código ${statusCode ?? 'desconhecido'})`)
+      default: {
+        const detail = statusCode ?? lastDisconnect?.error?.message ?? 'desconhecido'
+        log.info(`${t('app.disconnected')} (${detail})`)
+      }
     }
 
     await this.#scheduleReconnect()
@@ -755,6 +833,7 @@ export class Connection {
   async close() {
     this.shouldReconnect = false
     this.#clearPairingExpiry()
+    this.#clearRateLimitTimer()
     try {
       this.sock?.end(new Error('viewer-shutdown'))
     } catch {
