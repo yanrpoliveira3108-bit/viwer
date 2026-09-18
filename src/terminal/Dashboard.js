@@ -23,7 +23,7 @@ import { formatUptime, formatClock } from '../utils/time.js'
 import { sampleProcessCpu, processMemory, platformLabel } from '../utils/system.js'
 import { getTheme } from './theme.js'
 import { LOGO } from './logo.js'
-import { setConsoleSink } from '../logger/index.js'
+import { setConsoleSink, getRecentEntries } from '../logger/index.js'
 import { t } from '../i18n/index.js'
 
 const WIDTH = 62
@@ -45,6 +45,8 @@ export class Dashboard {
     this.timer = null
     this.running = false
     this.prevLines = 0
+    /** Código de pareamento em exibição (some ao conectar). @type {string|null} */
+    this.pairingCode = null
     /** @type {{level:string, line:string}[]} */
     this.logBuffer = []
     this.maxLogLines = config.get('dashboard.logLines') || 8
@@ -62,17 +64,39 @@ export class Dashboard {
       // (o sink de console do logger fica desativado). Sem painel, o próprio
       // logger imprime — nada é escrito aqui para evitar duplicidade.
       if (!this.running) return
-      this.logBuffer.push(entry)
-      if (this.logBuffer.length > this.maxLogLines) this.logBuffer.shift()
+      this.pushLog(entry)
+    })
+
+    // O código de pareamento vive no painel enquanto não há confirmação.
+    bus.safeOn(EVENTS.CONNECTION_PAIRING, ({ code }) => {
+      this.pairingCode = code
+      if (this.running) this.render()
+    })
+    bus.safeOn(EVENTS.CONNECTION_STATE, ({ state }) => {
+      if (state === 'open') this.pairingCode = null
+      if (this.running) this.render()
     })
 
     if (!this.#canRender()) return
+
+    // Captura os logs emitidos antes do painel assumir a tela.
+    for (const entry of getRecentEntries(this.maxLogLines)) this.pushLog(entry)
+
     this.running = true
     setConsoleSink(false)
     process.stdout.write(ansi.clearScreen + ansi.hideCursor)
     this.render()
     this.timer = setInterval(() => this.render(), this.config.get('dashboard.refreshMs'))
     this.timer.unref()
+  }
+
+  /**
+   * Adiciona uma entrada à área de registros (com limite).
+   * @param {{level: string, line: string}} entry Entrada de log.
+   */
+  pushLog(entry) {
+    this.logBuffer.push(entry)
+    if (this.logBuffer.length > this.maxLogLines) this.logBuffer.shift()
   }
 
   /** Encerra o painel devolvendo o terminal ao usuário. */
@@ -129,17 +153,20 @@ export class Dashboard {
     lines.push('')
 
     // Conexão.
-    lines.push(
-      ...box(
-        t('dashboard.connection'),
-        [
-          this.#row(t('dashboard.status'), this.#statusLabel()),
-          this.#row(t('dashboard.uptime'), th.value(formatUptime(uptimeMs))),
-          this.#row(t('dashboard.startedAt'), th.value(formatClock(snap.startedAt))),
-        ],
-        WIDTH
+    const connectionLines = [
+      this.#row(t('dashboard.status'), this.#statusLabel()),
+      this.#row(t('dashboard.uptime'), th.value(formatUptime(uptimeMs))),
+      this.#row(t('dashboard.startedAt'), th.value(formatClock(snap.startedAt))),
+    ]
+    // Código de pareamento em destaque enquanto aguarda confirmação;
+    // desaparece automaticamente quando a conexão abre.
+    if (this.pairingCode) {
+      connectionLines.push(this.#row(t('dashboard.pairingCode'), th.title(this.pairingCode)))
+      connectionLines.push(
+        this.#row(t('dashboard.pairingWhere'), th.warn('Aparelhos conectados → nº de telefone'))
       )
-    )
+    }
+    lines.push(...box(t('dashboard.connection'), connectionLines, WIDTH))
 
     // Sistema.
     const waVersion = this.connection.waVersion

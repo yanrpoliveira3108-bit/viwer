@@ -30,6 +30,10 @@ const state = {
   counts: { debug: 0, info: 0, warn: 0, error: 0 },
 }
 
+/** Anel de entradas recentes (alimenta o Dashboard ao assumir a tela). */
+const recentEntries = []
+const RECENT_LIMIT = 50
+
 /**
  * Configura o logger a partir da configuração central.
  *
@@ -98,9 +102,13 @@ function write(module, level, message) {
 
   const ts = formatClock()
   const line = `[${ts}] [${module}] [${level.toUpperCase()}] ${message}`
+  const entry = { ts, module, level, message, line }
+
+  recentEntries.push(entry)
+  if (recentEntries.length > RECENT_LIMIT) recentEntries.shift()
 
   state.writer?.write(line + '\n')
-  bus.emit(EVENTS.LOG_ENTRY, { ts, module, level, message, line })
+  bus.emit(EVENTS.LOG_ENTRY, entry)
 
   if (state.consoleSink) {
     // stdout para info/debug, stderr para warn/error (bom comportamento Unix).
@@ -123,6 +131,15 @@ export function createLogger(module) {
     warn: (msg) => write(scope, 'warn', msg),
     error: (msg) => write(scope, 'error', msg),
   }
+}
+
+/**
+ * Entradas recentes (para o Dashboard capturar o histórico pré-painel).
+ * @param {number} [count=20] Quantidade desejada.
+ * @returns {{ts:string, module:string, level:string, message:string, line:string}[]}
+ */
+export function getRecentEntries(count = 20) {
+  return recentEntries.slice(-count)
 }
 
 /** Encerra o escritor de arquivo (chamado no shutdown). */

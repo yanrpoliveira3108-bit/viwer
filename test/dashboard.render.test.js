@@ -61,3 +61,33 @@ test('render produz quadro completo sem exceções', () => {
   assert.ok(frame.includes('REGISTROS'), 'caixa de registros presente')
   assert.ok(frame.includes('1'), 'contador de mídia recuperada presente')
 })
+
+test('código de pareamento aparece no painel e some ao conectar', () => {
+  const originalWrite = process.stdout.write
+  const chunks = []
+  process.stdout.write = (chunk) => {
+    chunks.push(String(chunk))
+    return true
+  }
+
+  try {
+    const dashboard = new Dashboard(makeStubs())
+    dashboard.running = true
+
+    dashboard.pairingCode = 'ABCD-1234'
+    dashboard.render()
+    const withCode = chunks.join('')
+    assert.ok(withCode.includes('ABCD-1234'), 'código exibido na caixa de conexão')
+    assert.ok(withCode.includes('Onde digitar'), 'instrução de pareamento exibida')
+
+    chunks.length = 0
+    dashboard.pairingCode = null // conexão confirmada
+    dashboard.render()
+    assert.ok(!chunks.join('').includes('ABCD-1234'), 'código removido após confirmar')
+
+    dashboard.timer = null
+    dashboard.stop()
+  } finally {
+    process.stdout.write = originalWrite
+  }
+})

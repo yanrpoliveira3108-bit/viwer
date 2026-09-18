@@ -44,6 +44,8 @@ export default {
     status: 'Status',
     uptime: 'Tempo ativo',
     startedAt: 'Iniciado às',
+    pairingCode: 'Código',
+    pairingWhere: 'Onde digitar',
     node: 'Node.js',
     baileys: 'Baileys',
     whatsapp: 'WhatsApp',
