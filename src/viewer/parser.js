@@ -89,3 +89,17 @@ export function parseMessage(waMessage) {
 export function isGroupJid(jid) {
   return typeof jid === 'string' && jid.endsWith('@g.us')
 }
+
+/**
+ * Classifica o tipo de chat de um JID (para logs e diagnósticos).
+ * @param {string} jid JID.
+ * @returns {'privado'|'grupo'|'canal'|'status'|'outro'}
+ */
+export function classifyChatJid(jid) {
+  if (typeof jid !== 'string') return 'outro'
+  if (jid.endsWith('@g.us')) return 'grupo'
+  if (jid.includes('@newsletter')) return 'canal'
+  if (jid.endsWith('@broadcast') || jid === 'status@broadcast') return 'status'
+  if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid')) return 'privado'
+  return 'outro'
+}

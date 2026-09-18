@@ -20,6 +20,7 @@
   "features": {
     "recoverOnReply": true,
     "recoverOnReaction": true,
+    "recoverChannelsAuto": true,
     "autoRecover": { "enabled": false, "types": [], "groups": true, "private": true }
   },
   "media": {

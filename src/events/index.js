@@ -19,7 +19,7 @@
 
 import { bus } from '../core/EventBus.js'
 import { EVENTS } from '../constants.js'
-import { parseMessage } from '../viewer/parser.js'
+import { parseMessage, classifyChatJid } from '../viewer/parser.js'
 import { analyzeContent } from '../viewer/detector.js'
 import { createLogger } from '../logger/index.js'
 
@@ -78,7 +78,23 @@ export function registerEventBridge({ pipeline, cache, stats, config }) {
     stats.messageProcessed()
 
     // Toda View Once recebida é indexada — base dos Métodos 1 e 2.
-    pipeline.indexIncoming(message)
+    const indexed = pipeline.indexIncoming(message)
+
+    // Canais: o protocolo não entrega resposta nem autoria de reação, então
+    // a View Once é recuperada automaticamente ao chegar (padrão ligado).
+    if (
+      indexed &&
+      classifyChatJid(parsed.remoteJid) === 'canal' &&
+      config.get('features.recoverChannelsAuto')
+    ) {
+      log.info('View Once de canal recebida — recuperação automática iniciada')
+      void pipeline.recover({
+        source: 'channel-auto',
+        chatJid: message.key.remoteJid,
+        targetKey: { remoteJid: message.key.remoteJid, id: message.key.id },
+      })
+      return
+    }
 
     // Ponto de extensão para plugins/menu futuro (baixo acoplamento).
     bus.emit(EVENTS.WA_MESSAGE, parsed)
@@ -88,6 +104,7 @@ export function registerEventBridge({ pipeline, cache, stats, config }) {
     // Método 2 (via upsert — deduplicado com o evento messages.reaction).
     if (parsed.reaction && config.get('features.recoverOnReaction')) {
       if (parsed.reaction.emoji) {
+        log.info(`reação via mensagem detectada (${classifyChatJid(parsed.remoteJid)})`)
         void pipeline.recover({
           source: 'reaction',
           chatJid: parsed.remoteJid,
@@ -107,7 +124,7 @@ export function registerEventBridge({ pipeline, cache, stats, config }) {
       // Respostas a mensagens comuns são ignoradas silenciosamente.
       if (!entry && !analyzeContent(content).viewOnce) return
 
-      log.info('resposta a View Once detectada')
+      log.info(`resposta a View Once detectada (${classifyChatJid(parsed.remoteJid)})`)
       void pipeline.recover({
         source: 'reply',
         chatJid: parsed.remoteJid,
@@ -127,7 +144,7 @@ export function registerEventBridge({ pipeline, cache, stats, config }) {
     if (!reaction.text) return // remoção de reação — nada a fazer
     if (!key?.id || !key?.remoteJid) return
 
-    log.info('reação a View Once detectada')
+    log.info(`reação do número conectado detectada (${classifyChatJid(key.remoteJid)})`)
     void pipeline.recover({
       source: 'reaction',
       chatJid: key.remoteJid,

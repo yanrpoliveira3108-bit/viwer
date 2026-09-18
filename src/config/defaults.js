@@ -49,6 +49,14 @@ export const defaults = {
     /** Método 2 — recuperar ao reagir a uma View Once. */
     recoverOnReaction: true,
     /**
+     * Canais (@newsletter): o protocolo do WhatsApp não entrega "quem
+     * reagiu" nem permite responder em canais, então os gatilhos de
+     * resposta/reação não existem lá. Para cumprir "salvar View Once de
+     * canal", o Viewer recupera automaticamente toda View Once que chegar
+     * de um canal enquanto estiver conectado (padrão: ligado).
+     */
+    recoverChannelsAuto: true,
+    /**
      * Preparado para o futuro menu interativo (captura automática ao
      * receber, por tipo, grupos/privado). Não implementado nesta versão.
      */

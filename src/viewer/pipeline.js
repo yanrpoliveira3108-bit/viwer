@@ -21,6 +21,7 @@
 import { bus } from '../core/EventBus.js'
 import { EVENTS } from '../constants.js'
 import { analyzeContent, isQuotedContentDownloadable } from './detector.js'
+import { classifyChatJid } from './parser.js'
 import { downloadToTempFile } from './downloader.js'
 import { buildOutgoingContent, sendMedia } from './sender.js'
 import { removeSilently } from '../utils/fs.js'
@@ -58,20 +59,26 @@ export class RecoveryPipeline {
   /**
    * Indexa uma View Once recebida no cache (chamado pelo módulo de eventos).
    * @param {object} waMessage Mensagem completa recebida.
+   * @returns {boolean} `true` se era View Once com mídia e foi indexada.
    */
   indexIncoming(waMessage) {
     try {
       const analysis = analyzeContent(waMessage?.message)
-      if (!analysis.viewOnce || !analysis.mediaType) return
+      if (!analysis.viewOnce || !analysis.mediaType) return false
       this.cache.set(waMessage, analysis.mediaType)
-      log.debug('view once indexada no cache')
+      log.info(
+        `View Once indexada no cache (${classifyChatJid(waMessage.key.remoteJid)}, ` +
+          `${analysis.mediaType})`
+      )
       bus.emit(EVENTS.VO_DETECTED, {
         origin: 'received',
         chatJid: waMessage.key.remoteJid,
         mediaType: analysis.mediaType,
       })
+      return true
     } catch (error) {
       log.warn(`falha ao indexar view once: ${describeError(error)}`)
+      return false
     }
   }
 
@@ -79,7 +86,7 @@ export class RecoveryPipeline {
    * Executa a recuperação completa para uma mensagem-alvo.
    *
    * @param {object} options Opções.
-   * @param {'reply'|'reaction'} options.source Método gatilho.
+   * @param {'reply'|'reaction'|'channel-auto'} options.source Método gatilho.
    * @param {string} options.chatJid JID do chat (grupo ou privado).
    * @param {{remoteJid: string, id: string}} options.targetKey Chave da original.
    * @param {object|null} [options.fallbackContent] Conteúdo citado embutido
@@ -116,7 +123,10 @@ export class RecoveryPipeline {
       }
       if (!original) {
         this.stats.skipped()
-        log.warn(`mensagem original não localizada no cache (id=${id})`)
+        log.warn(
+          `original não localizada (${classifyChatJid(chatJid)}, id=${id}) — ` +
+            'a View Once precisa ter chegado com o Viewer conectado para ser recuperada'
+        )
         bus.emit(EVENTS.RECOVERY_SKIPPED, { source, reason: SkipReason.NOT_FOUND })
         return false
       }

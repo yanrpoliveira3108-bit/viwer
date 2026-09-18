@@ -4,7 +4,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseMessage, isGroupJid } from '../src/viewer/parser.js'
+import { parseMessage, isGroupJid, classifyChatJid } from '../src/viewer/parser.js'
 
 test('mensagem comum é normalizada', () => {
   const parsed = parseMessage({
@@ -29,7 +29,9 @@ test('resposta extrai contexto da citada', () => {
         contextInfo: {
           stanzaId: 'VO123',
           participant: 'autor@s.whatsapp.net',
-          quotedMessage: { viewOnceMessage: { message: { imageMessage: { url: 'u', mediaKey: 'k' } } } },
+          quotedMessage: {
+            viewOnceMessage: { message: { imageMessage: { url: 'u', mediaKey: 'k' } } },
+          },
         },
       },
     },
@@ -66,4 +68,14 @@ test('isGroupJid distingue grupos', () => {
   assert.equal(isGroupJid('abc@g.us'), true)
   assert.equal(isGroupJid('5511@s.whatsapp.net'), false)
   assert.equal(isGroupJid(null), false)
+})
+
+test('classifyChatJid identifica o tipo de conversa', () => {
+  assert.equal(classifyChatJid('grupo@g.us'), 'grupo')
+  assert.equal(classifyChatJid('12345@newsletter'), 'canal')
+  assert.equal(classifyChatJid('5511@s.whatsapp.net'), 'privado')
+  assert.equal(classifyChatJid('5511@lid'), 'privado')
+  assert.equal(classifyChatJid('status@broadcast'), 'status')
+  assert.equal(classifyChatJid('algo-desconhecido'), 'outro')
+  assert.equal(classifyChatJid(null), 'outro')
 })
