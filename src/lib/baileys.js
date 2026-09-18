@@ -15,6 +15,7 @@
 
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { applyPairingSourcePatches } from './baileys-patches.js'
 
 const require = createRequire(import.meta.url)
 
@@ -166,6 +167,15 @@ function applyCompatibilityPatches(apiObj) {
  */
 export function getBaileys() {
   if (cached) return cached.api
+
+  // Patches de pareamento aplicados ANTES do primeiro require: corrigem o
+  // fluxo quebrado pela mudança de protocolo do WhatsApp em 07/2026.
+  const patchResult = applyPairingSourcePatches((id) => require.resolve(id))
+  if (patchResult.failed.length) {
+    console.log(
+      `[VIEWER] aviso: patches de pareamento não aplicados: ${patchResult.failed.join(', ')}`
+    )
+  }
 
   const errors = []
   for (const candidate of ENTRY_CANDIDATES) {
