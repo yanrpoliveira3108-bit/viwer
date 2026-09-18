@@ -22,7 +22,8 @@ export default {
     reconnecting: 'Reconectando...',
     disconnected: 'Desconectado.',
     loggedOut: 'Sessão encerrada no aparelho. Apague a pasta de sessão para parear novamente.',
-    pairingPrompt: 'Digite o número do WhatsApp (somente dígitos, com DDI+DDD):',
+    pairingPrompt: 'Digite o número do WhatsApp (com DDI+DDD, ex.: 5519912345678):',
+    pairingConfirm: 'Confirma que ESTE é o número do chip deste celular:',
     pairingCodeTitle: 'Código de pareamento',
     pairingHelp:
       'No WhatsApp: Configurações → Aparelhos conectados → Conectar com número de telefone',
@@ -44,6 +45,7 @@ export default {
     status: 'Status',
     uptime: 'Tempo ativo',
     startedAt: 'Iniciado às',
+    pairingPhone: 'Telefone',
     pairingCode: 'Código',
     pairingWhere: 'Onde digitar',
     node: 'Node.js',

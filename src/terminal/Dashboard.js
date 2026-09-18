@@ -53,6 +53,8 @@ export class Dashboard {
     this.resizeHandler = null
     /** Código de pareamento em exibição (some ao conectar). @type {string|null} */
     this.pairingCode = null
+    /** Número vinculado ao código (para conferência). @type {string|null} */
+    this.pairingPhone = null
     /** @type {{level:string, line:string}[]} */
     this.logBuffer = []
     this.maxLogLines = config.get('dashboard.logLines') || 8
@@ -74,12 +76,16 @@ export class Dashboard {
     })
 
     // O código de pareamento vive no painel enquanto não há confirmação.
-    bus.safeOn(EVENTS.CONNECTION_PAIRING, ({ code }) => {
+    bus.safeOn(EVENTS.CONNECTION_PAIRING, ({ code, phone }) => {
       this.pairingCode = code
+      if (phone) this.pairingPhone = phone
       if (this.running) this.render()
     })
     bus.safeOn(EVENTS.CONNECTION_STATE, ({ state }) => {
-      if (state === 'open') this.pairingCode = null
+      if (state === 'open') {
+        this.pairingCode = null
+        this.pairingPhone = null
+      }
       if (this.running) this.render()
     })
 
@@ -184,6 +190,9 @@ export class Dashboard {
     // Código de pareamento em destaque enquanto aguarda confirmação;
     // desaparece automaticamente quando a conexão abre.
     if (this.pairingCode) {
+      if (this.pairingPhone) {
+        connectionLines.push(this.#row(t('dashboard.pairingPhone'), th.value(this.pairingPhone)))
+      }
       connectionLines.push(this.#row(t('dashboard.pairingCode'), th.title(this.pairingCode)))
       connectionLines.push(
         this.#row(t('dashboard.pairingWhere'), th.warn('Aparelhos conectados → nº de telefone'))

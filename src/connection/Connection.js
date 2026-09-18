@@ -18,6 +18,7 @@
  */
 
 import readline from 'node:readline'
+import { randomBytes } from 'node:crypto'
 import { api, getBundledWaVersion } from '../lib/baileys.js'
 import { bus } from '../core/EventBus.js'
 import { EVENTS } from '../constants.js'
@@ -33,6 +34,73 @@ const MAX_PAIRING_ATTEMPTS = 3
 
 /** Espera para o handshake de registro terminar antes do pedido de código. */
 const PAIRING_GRACE_MS = 4000
+
+/** Validade aproximada do código exibido pelo WhatsApp no celular. */
+const PAIRING_CODE_TTL_MS = 70000
+
+/**
+ * Normaliza um número de telefone brasileiro para o formato internacional
+ * exigido pelo pareamento (somente dígitos, DDI + DDD + número).
+ * @param {string} raw Entrada bruta do usuário/configuração.
+ * @returns {{digits: string|null, notes: string[]}}
+ */
+export function normalizeBrPhoneNumber(raw) {
+  const notes = []
+  let digits = String(raw ?? '').replace(/\D/g, '')
+  if (!digits) return { digits: null, notes: ['número vazio'] }
+
+  // Prefixo de tronco nacional (0) antes do DDD não faz parte do número.
+  if (/^0+/.test(digits)) {
+    digits = digits.replace(/^0+/, '')
+    notes.push('prefixo 0 inicial removido')
+  }
+
+  if (!digits.startsWith('55')) {
+    if (digits.length === 10 || digits.length === 11) {
+      digits = `55${digits}`
+      notes.push('DDI 55 (Brasil) adicionado automaticamente')
+    } else {
+      // Já veio com DDI de outro país: o pareamento do Viewer é BR.
+      return { digits: null, notes: ['use o DDI 55 + DDD + número'] }
+    }
+  }
+
+  const local = digits.slice(2) // DDD + número
+  const firstOfNumber = local[2] // primeiro dígito do número (após o DDD)
+  if (local.length === 11) {
+    // Celular brasileiro sempre começa em 9 (nono dígito).
+    if (firstOfNumber !== '9') {
+      return { digits: null, notes: ['celular com 11 dígitos deve começar com 9 após o DDD'] }
+    }
+  } else if (local.length === 10) {
+    // Fixo começa em 2–5; começando em 9 é quase sempre celular digitado
+    // sem o nono dígito — recusar evita parear o número errado.
+    if (!/^[2-5]/.test(firstOfNumber ?? '')) {
+      return { digits: null, notes: ['faltou o 9 do celular ou o DDD está errado'] }
+    }
+    notes.push('número fixo (8 dígitos) — o WhatsApp normalmente usa celular com 9')
+  } else {
+    return { digits: null, notes: ['quantidade de dígitos inesperada'] }
+  }
+
+  return { digits, notes }
+}
+
+/**
+ * Formata para exibição humana: +55 (19) 91234-5678.
+ * @param {string} digits Somente dígitos (12–13).
+ * @returns {string}
+ */
+function formatBrPhone(digits) {
+  const ddi = digits.slice(0, 2)
+  const ddd = digits.slice(2, 4)
+  const local = digits.slice(4)
+  const tail =
+    local.length === 9
+      ? `${local.slice(0, 5)}-${local.slice(5)}`
+      : `${local.slice(0, 4)}-${local.slice(4)}`
+  return `+${ddi} (${ddd}) ${tail}`
+}
 
 /**
  * Fontes da versão mais recente do WhatsApp, em ordem de preferência.
@@ -105,10 +173,13 @@ export class Connection {
     this.auth = null
     /** Número preparado para o pareamento (antes do socket existir). */
     this.pairingPhone = null
+    /** Número formatado para exibição/confirmação. @type {string|null} */
+    this.pairingPhonePretty = null
     this.pairingInFlight = false
-    /** Código estável usado em todas as tentativas (evita códigos novos
-     * invalidando o anterior a cada reconexão). */
-    this.stablePairingCode = null
+    /** Socket para o qual o código já foi publicado (1 pedido por sessão). */
+    this.codePublishedForSocket = null
+    /** Timer de expiração do código em exibição. @type {NodeJS.Timeout|null} */
+    this.pairingExpiryTimer = null
   }
 
   /** @returns {object|null} Socket conectado (ou em conexão). */
@@ -155,22 +226,29 @@ export class Connection {
       log.info('pareamento anterior incompleto detectado — sessão reiniciada')
     }
 
-    let phone = String(this.config.get('connection.phoneNumber') || '').replace(/\D/g, '')
-    if (!phone) phone = await this.#promptPhoneNumber()
-    if (!phone || phone.length < 8) {
-      throw new Error('número de telefone inválido para o Pairing Code')
+    let phone = String(this.config.get('connection.phoneNumber') || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    let normalized = normalizeBrPhoneNumber(phone)
+    if (!normalized.digits) phone = await this.#promptPhoneNumber()
+    normalized = normalizeBrPhoneNumber(phone)
+    if (!normalized.digits) {
+      throw new Error(
+        `número de telefone inválido (${normalized.notes.join('; ')}) — ` +
+          'use DDI+DDD+número (ex.: 5519912345678 ou 19 91234-5678)'
+      )
     }
-    this.pairingPhone = phone
+    if (normalized.notes.length) log.info(`número ajustado: ${normalized.notes.join('; ')}`)
 
-    // Um único código para todo o processo: reconexões não trocam o código
-    // enquanto o usuário o digita no celular.
-    const custom = String(this.config.get('connection.customPairingCode') || '').trim()
-    if (custom.length === 8) {
-      this.stablePairingCode = custom.toUpperCase()
-    } else {
-      const { bytesToCrockford } = api()
-      const { randomBytes } = await import('node:crypto')
-      this.stablePairingCode = bytesToCrockford(randomBytes(5)).toUpperCase()
+    this.pairingPhone = normalized.digits
+    this.pairingPhonePretty = formatBrPhone(normalized.digits)
+
+    // O código é vinculado ao número EXATO pelo servidor do WhatsApp; um
+    // dígito errado gera "não foi possível conectar o dispositivo". Por isso
+    // o número resolvido é exibido e confirmado antes de criar o socket.
+    log.info(`número que será pareado: ${this.pairingPhonePretty}`)
+    if (!(await this.#confirmPhoneNumber())) {
+      throw new Error('pareamento cancelado pelo usuário (número não confirmado)')
     }
   }
 
@@ -233,6 +311,7 @@ export class Connection {
   async #connect() {
     const { default: makeWASocket } = api()
     this.#setState('connecting')
+    this.#clearPairingExpiry()
 
     // Sem sessão registrada, o handshake PRECISA seguir o caminho de
     // registro; creds.me residual (de tentativa de pareamento anterior)
@@ -241,13 +320,16 @@ export class Connection {
       this.auth.state.creds.me = undefined
     }
 
+    // browser[1] precisa ser um nome de plataforma conhecido do protocolo
+    // (o fork converte em DeviceProps.PlatformType; "Viewer" viraria
+    // UNKNOWN). Mantém identificação neutra e compatível.
     const browser = this.config.get('connection.browser')
     this.sock = makeWASocket({
       auth: this.auth.state,
       logger: quietLogger,
       printQRInTerminal: false,
       browser:
-        Array.isArray(browser) && browser.length === 3 ? browser : ['Ubuntu', 'Viewer', '1.0.0'],
+        Array.isArray(browser) && browser.length === 3 ? browser : ['Ubuntu', 'Chrome', '120.0.0'],
       markOnlineOnConnect: this.config.get('connection.markOnlineOnConnect'),
       syncFullHistory: this.config.get('connection.syncFullHistory'),
       version: this.waVersion ? this.waVersion.split('.').map(Number) : undefined,
@@ -288,12 +370,31 @@ export class Connection {
   }
 
   /**
+   * Gera um código de pareamento novo (8 caracteres). O fork usa um código
+   * fixo como padrão ("ZEROBETA"), que colidiria entre sessões; por isso o
+   * Viewer SEMPRE fornece o próprio código.
+   * @returns {string}
+   */
+  #generatePairingCode() {
+    const { bytesToCrockford } = api()
+    return bytesToCrockford(randomBytes(5)).toUpperCase()
+  }
+
+  /**
    * Pede o Pairing Code no socket atual.
    * Aguarda o websocket abrir + o handshake de registro assentar, e trata
    * falhas sem derrubar o processo (a reconexão tentará de novo).
+   *
+   * Regras de segurança da sessão de pareamento:
+   * - um pedido por socket (pedidos repetidos na mesma sessão conflitam);
+   * - código NOVO a cada sessão nova (o código fica vinculado à identidade
+   *   efêmera do socket; reutilizá-lo após reconexão gera sessão órfã e o
+   *   celular responde "não foi possível conectar o dispositivo");
+   * - código expirado (~60s no celular) renova a sessão automaticamente.
    */
   async #attemptPairing() {
     if (this.pairingInFlight) return
+    if (this.codePublishedForSocket === this.sock) return
     this.pairingInFlight = true
     try {
       this.#setState('pairing')
@@ -303,6 +404,7 @@ export class Connection {
       // Deixa o registro inicial concluir antes do pedido de código.
       await sleep(PAIRING_GRACE_MS)
       if (this.auth.state.creds.registered) return
+      if (this.codePublishedForSocket === this.sock) return
 
       if (this.pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
         log.error(
@@ -314,12 +416,18 @@ export class Connection {
       }
       this.pairingAttempts += 1
 
-      const code = await this.sock.requestPairingCode(this.pairingPhone, this.stablePairingCode)
+      const code = await this.sock.requestPairingCode(
+        this.pairingPhone,
+        this.#generatePairingCode()
+      )
+      this.codePublishedForSocket = this.sock
       const pretty = `${code.slice(0, 4)}-${code.slice(4)}`
       log.info(`${t('app.pairingCodeTitle')}: ${pretty}`)
+      log.info(`confira o número no celular: ${this.pairingPhonePretty}`)
       log.info(t('app.pairingHelp'))
       log.info(t('app.waitingAuth'))
-      bus.emit(EVENTS.CONNECTION_PAIRING, { code: pretty })
+      bus.emit(EVENTS.CONNECTION_PAIRING, { code: pretty, phone: this.pairingPhonePretty })
+      this.#armPairingExpiry()
     } catch (error) {
       log.warn(
         `pedido de pareamento falhou (${error?.message ?? 'socket indisponível'}); ` +
@@ -327,6 +435,35 @@ export class Connection {
       )
     } finally {
       this.pairingInFlight = false
+    }
+  }
+
+  /**
+   * Renova a sessão de pareamento quando o código expira sem confirmação:
+   * encerra o socket atual (a reconexão cria registro novo + código novo).
+   */
+  #armPairingExpiry() {
+    this.#clearPairingExpiry()
+    const sock = this.sock
+    this.pairingExpiryTimer = setTimeout(() => {
+      if (this.sock !== sock) return
+      if (this.state === 'open' || this.auth.state.creds.registered) return
+      log.warn('o código expirou sem confirmação — gerando nova sessão e novo código')
+      this.pairingAttempts = 0 // expiração é inatividade do usuário, não falha
+      try {
+        sock?.end(new Error('pairing-code-expired'))
+      } catch {
+        /* socket já encerrado */
+      }
+    }, PAIRING_CODE_TTL_MS)
+    this.pairingExpiryTimer.unref()
+  }
+
+  /** Cancela o timer de expiração do código. */
+  #clearPairingExpiry() {
+    if (this.pairingExpiryTimer) {
+      clearTimeout(this.pairingExpiryTimer)
+      this.pairingExpiryTimer = null
     }
   }
 
@@ -355,6 +492,7 @@ export class Connection {
     if (connection === 'open') {
       this.attempts = 0
       this.pairingAttempts = 0
+      this.#clearPairingExpiry()
       this.#setState('open')
       log.info(t('app.connected'))
       return
@@ -366,6 +504,7 @@ export class Connection {
     }
 
     if (connection !== 'close') return
+    this.#clearPairingExpiry()
 
     const { DisconnectReason } = api()
     const statusCode = lastDisconnect?.error?.output?.statusCode
@@ -462,7 +601,7 @@ export class Connection {
 
   /**
    * Pergunta o número no terminal (apenas quando não configurado).
-   * @returns {Promise<string>} Somente dígitos.
+   * @returns {Promise<string>} Texto digitado (normalizado depois).
    */
   async #promptPhoneNumber() {
     if (!process.stdin.isTTY) {
@@ -472,10 +611,30 @@ export class Connection {
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
     try {
-      const answer = await new Promise((resolve) => {
+      return await new Promise((resolve) => {
         rl.question(`\n${t('app.pairingPrompt')} `, resolve)
       })
-      return answer.replace(/\D/g, '')
+    } finally {
+      rl.close()
+    }
+  }
+
+  /**
+   * Confirma o número resolvido antes de criar o socket. Sem terminal
+   * interativo, segue com aviso (o número fica visível no painel).
+   * @returns {Promise<boolean>}
+   */
+  async #confirmPhoneNumber() {
+    if (!process.stdin.isTTY) {
+      log.warn('terminal não interativo — seguindo com o número informado')
+      return true
+    }
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    try {
+      const answer = await new Promise((resolve) => {
+        rl.question(`${t('app.pairingConfirm')} ${this.pairingPhonePretty}? [s/N] `, resolve)
+      })
+      return /^s(sim)?$/i.test(answer.trim())
     } finally {
       rl.close()
     }
@@ -495,6 +654,7 @@ export class Connection {
   /** Encerra a conexão (shutdown gracioso). */
   async close() {
     this.shouldReconnect = false
+    this.#clearPairingExpiry()
     try {
       this.sock?.end(new Error('viewer-shutdown'))
     } catch {
