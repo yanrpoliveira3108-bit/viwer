@@ -69,6 +69,20 @@ const COMPANION_HISTORY_SYNC_CONFIG = {
 let patchesApplied = false
 
 /**
+ * Flags de diagnóstico para os patches de registro (ajustam o registro
+ * enviado ao servidor sem reinstalar nada):
+ * - VIEWER_REG_VERSION_PATCH=0  desativa a injeção de DeviceProps.version;
+ * - VIEWER_REG_HISTORY_PATCH=1  ativa também o historySyncConfig.
+ * @returns {{version: boolean, history: boolean}}
+ */
+function getRegistrationPatchFlags() {
+  return {
+    version: process.env.VIEWER_REG_VERSION_PATCH !== '0',
+    history: process.env.VIEWER_REG_HISTORY_PATCH === '1',
+  }
+}
+
+/**
  * Aplica correções de compatibilidade no fork congelado.
  *
  * O módulo `Socket/socket.js` resolve `Utils.generateRegistrationNode` por
@@ -113,15 +127,17 @@ function applyCompatibilityPatches(apiObj) {
     validateModule.generateRegistrationNode = (signalCreds, config) => {
       const node = original(signalCreds, config)
       try {
+        const flags = getRegistrationPatchFlags()
+        if (!flags.version && !flags.history) return node
         const pairingData = node?.devicePairingData
         if (pairingData?.deviceProps && apiObj?.proto?.DeviceProps) {
           const props = apiObj.proto.DeviceProps.decode(pairingData.deviceProps)
-          props.version = { ...COMPANION_DEVICE_VERSION }
-          props.historySyncConfig = { ...COMPANION_HISTORY_SYNC_CONFIG }
+          if (flags.version) props.version = { ...COMPANION_DEVICE_VERSION }
+          if (flags.history) props.historySyncConfig = { ...COMPANION_HISTORY_SYNC_CONFIG }
           pairingData.deviceProps = apiObj.proto.DeviceProps.encode(props).finish()
         }
       } catch {
-        /* sem o campo version segue o fluxo original (telemetria acusa) */
+        /* sem os campos segue o fluxo original (telemetria acusa) */
       }
       return node
     }
@@ -129,7 +145,15 @@ function applyCompatibilityPatches(apiObj) {
     // Confirma que o barrel enxerga a função substituída.
     if (barrel.generateRegistrationNode !== validateModule.generateRegistrationNode) {
       validateModule.generateRegistrationNode = original
+      return
     }
+    const flags = getRegistrationPatchFlags()
+    // Diagnóstico visível: confirma se o patch está ativo neste processo.
+    // eslint-disable-next-line no-console
+    console.log(
+      `[VIEWER] patch de compatibilidade do registro ativo ` +
+        `(version=${flags.version ? 'sim' : 'não'}, historySyncConfig=${flags.history ? 'sim' : 'não'})`
+    )
   } catch {
     /* patch é otimização de compatibilidade; nunca impede a inicialização */
   }
