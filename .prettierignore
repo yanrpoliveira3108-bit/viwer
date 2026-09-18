@@ -1,0 +1,7 @@
+node_modules
+session
+data
+logs
+backups
+tmp
+package-lock.json

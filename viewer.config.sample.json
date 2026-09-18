@@ -1,0 +1,68 @@
+{
+  "viewer": {
+    "language": "pt-BR",
+    "theme": "default"
+  },
+  "connection": {
+    "phoneNumber": "",
+    "customPairingCode": "",
+    "sessionDir": "session",
+    "browser": ["Ubuntu", "Viewer", "1.0.0"],
+    "reconnect": {
+      "enabled": true,
+      "maxAttempts": 0,
+      "baseDelayMs": 3000,
+      "maxDelayMs": 60000
+    },
+    "syncFullHistory": false,
+    "markOnlineOnConnect": true
+  },
+  "features": {
+    "recoverOnReply": true,
+    "recoverOnReaction": true,
+    "autoRecover": { "enabled": false, "types": [], "groups": true, "private": true }
+  },
+  "media": {
+    "tempDir": "tmp",
+    "maxFileSizeMB": 200,
+    "downloadTimeoutMs": 180000,
+    "sendTimeoutMs": 180000
+  },
+  "cache": {
+    "maxEntries": 500,
+    "ttlMinutes": 1440,
+    "sweepIntervalSeconds": 60
+  },
+  "logs": {
+    "level": "info",
+    "fileEnabled": true,
+    "dir": "logs",
+    "maxFileSizeMB": 5,
+    "maxFiles": 5
+  },
+  "dashboard": {
+    "enabled": true,
+    "refreshMs": 2000,
+    "logLines": 8
+  },
+  "database": {
+    "file": "data/viewer.db.json",
+    "saveIntervalMs": 30000
+  },
+  "stats": {
+    "persist": true
+  },
+  "update": {
+    "channel": "stable",
+    "repoOwner": "yanrpoliveira3108-bit",
+    "repoName": "viwer",
+    "backupDir": "backups",
+    "keepBackups": 5
+  },
+  "plugins": {
+    "enabled": true,
+    "dir": "plugins"
+  },
+  "menu": { "enabled": false },
+  "notifications": { "enabled": true }
+}
