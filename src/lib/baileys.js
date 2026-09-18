@@ -99,6 +99,28 @@ export function getBaileysRoot() {
 }
 
 /**
+ * Versão do WhatsApp embutida na biblioteca (arquivo de padrão do fork).
+ * Usada como último recurso quando nenhuma fonte remota está acessível.
+ *
+ * @returns {number[]|null} Tripla de versão ou `null` se indisponível.
+ */
+export function getBundledWaVersion() {
+  const candidates = [
+    `${BAILEYS_PACKAGE}/baileys/lib/Defaults/baileys-version.json`,
+    `${BAILEYS_PACKAGE}/lib/Defaults/baileys-version.json`,
+  ]
+  for (const candidate of candidates) {
+    try {
+      const data = require(require.resolve(candidate))
+      if (Array.isArray(data?.version)) return data.version
+    } catch {
+      /* tenta o próximo candidato */
+    }
+  }
+  return null
+}
+
+/**
  * Acesso conveniente à API carregada.
  * Todos os módulos do Viewer devem importar exclusivamente daqui.
  *

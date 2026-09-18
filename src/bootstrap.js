@@ -125,8 +125,11 @@ export async function bootstrap() {
   runtime.menu = new MenuManager({ config, stats: runtime.stats })
 
   // ── Conectando ──────────────────────────────────────────────────────────
+  // O número do pareamento é resolvido ANTES do socket existir (sem disputa
+  // entre prompt e ciclo de vida da conexão); o código é pedido no momento
+  // certo e repetido automaticamente nas reconexões.
+  await runtime.connection.preparePairing()
   await runtime.connection.start()
-  await runtime.connection.performPairingIfNeeded()
 
   // Dashboard assume a tela após o fluxo de pareamento/sessão.
   runtime.dashboard = new Dashboard({

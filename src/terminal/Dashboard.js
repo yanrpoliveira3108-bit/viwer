@@ -58,9 +58,12 @@ export class Dashboard {
   /** Inicia o painel (ou modo passivo quando a saída não é um terminal). */
   start() {
     bus.safeOn(EVENTS.LOG_ENTRY, (entry) => {
+      // Com o painel ativo, os logs entram na área de registros do quadro
+      // (o sink de console do logger fica desativado). Sem painel, o próprio
+      // logger imprime — nada é escrito aqui para evitar duplicidade.
+      if (!this.running) return
       this.logBuffer.push(entry)
       if (this.logBuffer.length > this.maxLogLines) this.logBuffer.shift()
-      if (!this.running) process.stdout.write(entry.line + '\n')
     })
 
     if (!this.#canRender()) return

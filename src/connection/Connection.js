@@ -6,7 +6,11 @@
  * boruto_vk7-baileys. Responsabilidades:
  *
  * - criar/recriar o socket (sessão multi-arquivo);
- * - fluxo de Pairing Code (código de pareamento);
+ * - fluxo de Pairing Code robusto (número resolvido ANTES do socket,
+ *   pedido de código com handshake concluído, repetição em reconexões);
+ * - resolução da versão do WhatsApp com cadeia de fontes e fallback
+ *   registrado em log (a biblioteca embute uma versão que pode ficar
+ *   defasada — o servidor rejeita clientes antigos);
  * - reconexão automática com backoff exponencial;
  * - publicação do estado no barramento interno de eventos.
  *
@@ -14,7 +18,7 @@
  */
 
 import readline from 'node:readline'
-import { api } from '../lib/baileys.js'
+import { api, getBundledWaVersion } from '../lib/baileys.js'
 import { bus } from '../core/EventBus.js'
 import { EVENTS } from '../constants.js'
 import { createLogger } from '../logger/index.js'
@@ -23,6 +27,26 @@ import { ensureDirSync } from '../utils/fs.js'
 import { t } from '../i18n/index.js'
 
 const log = createLogger('CONEXÃO')
+
+/** Máximo de tentativas de pareamento antes de orientar o usuário. */
+const MAX_PAIRING_ATTEMPTS = 3
+
+/** Espera para o handshake de registro terminar antes do pedido de código. */
+const PAIRING_GRACE_MS = 1500
+
+/** Fontes da versão mais recente do WhatsApp, em ordem de preferência. */
+const VERSION_SOURCES = [
+  {
+    name: 'fork oficial',
+    url: 'https://raw.githubusercontent.com/Itsukichann/Baileys/refs/heads/master/lib/Defaults/baileys-version.json',
+    extract: (data) => data?.version,
+  },
+  {
+    name: 'repositório base',
+    url: 'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/baileys-version.json',
+    extract: (data) => JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')).version,
+  },
+]
 
 /** Logger silencioso entregue à biblioteca (evita ruído do pino no painel). */
 const quietLogger = {
@@ -33,6 +57,17 @@ const quietLogger = {
   error: () => {},
   debug: () => {},
   trace: () => {},
+}
+
+/**
+ * Valida o formato de uma versão do WhatsApp.
+ * @param {unknown} version Candidata.
+ * @returns {number[]|null} Tripla numérica ou `null`.
+ */
+function isValidWaVersion(version) {
+  return Array.isArray(version) && version.length === 3 && version.every((n) => Number.isFinite(n))
+    ? version.map(Number)
+    : null
 }
 
 export class Connection {
@@ -48,9 +83,14 @@ export class Connection {
     this.state = 'connecting'
     this.closeReason = null
     this.attempts = 0
+    this.pairingAttempts = 0
     this.shouldReconnect = true
     this.waVersion = null
+    this.waVersionSource = null
     this.auth = null
+    /** Número preparado para o pareamento (antes do socket existir). */
+    this.pairingPhone = null
+    this.pairingInFlight = false
   }
 
   /** @returns {object|null} Socket conectado (ou em conexão). */
@@ -74,24 +114,81 @@ export class Connection {
   }
 
   /**
-   * Inicializa a conexão (cria socket e registra listeners).
+   * Etapa 1 do pareamento: resolve o número ANTES de criar o socket,
+   * evitando disputa entre o prompt e o ciclo de vida da conexão.
+   * @returns {Promise<void>}
+   */
+  async preparePairing() {
+    const sessionDir = this.config.resolvePath(this.config.get('connection.sessionDir'))
+    ensureDirSync(sessionDir)
+    const { useMultiFileAuthState } = api()
+    this.auth = await useMultiFileAuthState(sessionDir)
+
+    if (this.auth.state.creds.registered) {
+      log.info(t('app.restoringSession'))
+      return
+    }
+
+    // Sessão parcialmente registrada (pareamento interrompido) é reiniciada:
+    // sem isso, o fork tentaria "login" com identidade nunca pareada.
+    if (this.auth.state.creds.me) {
+      this.auth.state.creds.me = undefined
+      await this.auth.saveCreds()
+      log.info('pareamento anterior incompleto detectado — sessão reiniciada')
+    }
+
+    let phone = String(this.config.get('connection.phoneNumber') || '').replace(/\D/g, '')
+    if (!phone) phone = await this.#promptPhoneNumber()
+    if (!phone || phone.length < 8) {
+      throw new Error('número de telefone inválido para o Pairing Code')
+    }
+    this.pairingPhone = phone
+  }
+
+  /**
+   * Etapa 2: inicializa a conexão (resolução de versão + socket).
    * @returns {Promise<void>}
    */
   async start() {
-    const { fetchLatestBaileysVersion } = api()
-    try {
-      // Timeout curto: sem rede o Viewer inicia mesmo assim.
-      const { version } = await fetchLatestBaileysVersion({ timeout: 8000 })
-      this.waVersion = String(version)
-    } catch {
-      this.waVersion = null // offline: o Dashboard mostrará "indisponível"
+    await this.#resolveWaVersion()
+    await this.#connect()
+  }
+
+  /**
+   * Resolve a versão do WhatsApp a ser anunciada ao servidor.
+   * Cadeia: fontes remotas (atualizadas) → versão embutida na biblioteca.
+   * Cada passo é registrado em log; nunca interrompe a inicialização.
+   */
+  async #resolveWaVersion() {
+    for (const source of VERSION_SOURCES) {
+      try {
+        const response = await fetch(source.url, { signal: AbortSignal.timeout(8000) })
+        if (!response.ok) continue
+        const version = isValidWaVersion(source.extract(await response.json()))
+        if (version) {
+          this.waVersion = version.join('.')
+          this.waVersionSource = source.name
+          log.info(`versão do WhatsApp: ${this.waVersion} (${source.name})`)
+          return
+        }
+      } catch {
+        log.debug(`fonte de versão indisponível: ${source.name}`)
+      }
     }
 
-    const { useMultiFileAuthState } = api()
-    const sessionDir = this.config.resolvePath(this.config.get('connection.sessionDir'))
-    ensureDirSync(sessionDir)
-    this.auth = await useMultiFileAuthState(sessionDir)
-    await this.#connect()
+    const bundled = isValidWaVersion(getBundledWaVersion())
+    if (bundled) {
+      this.waVersion = bundled.join('.')
+      this.waVersionSource = 'embalada na biblioteca'
+      log.warn(
+        `sem acesso às versões atualizadas — usando a versão embutida (${this.waVersion}). ` +
+          'Se a conexão for recusada pelo WhatsApp, verifique sua internet.'
+      )
+      return
+    }
+    this.waVersion = null
+    this.waVersionSource = null
+    log.warn('não foi possível determinar a versão do WhatsApp; usando padrão da biblioteca')
   }
 
   /** Cria um socket novo (primeira vez ou reconexão). */
@@ -114,6 +211,56 @@ export class Connection {
     this.#registerSocketEvents()
     // Notifica módulos interessados (registro de eventos WA, plugins).
     bus.emit(EVENTS.CONNECTION_SOCKET, { sock: this.sock })
+
+    // Pareamento: dispara para cada socket novo enquanto não registrado.
+    if (!this.auth.state.creds.registered && this.pairingPhone) {
+      void this.#attemptPairing()
+    }
+  }
+
+  /**
+   * Pede o Pairing Code no socket atual.
+   * Aguarda o websocket abrir + o handshake de registro assentar, e trata
+   * falhas sem derrubar o processo (a reconexão tentará de novo).
+   */
+  async #attemptPairing() {
+    if (this.pairingInFlight) return
+    this.pairingInFlight = true
+    try {
+      this.#setState('pairing')
+      log.info(t('app.generatingPairing'))
+
+      await this.#waitForWebsocket()
+      // Deixa o registro inicial concluir antes do pedido de código.
+      await sleep(PAIRING_GRACE_MS)
+      if (this.auth.state.creds.registered) return
+
+      if (this.pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
+        log.error(
+          'número máximo de tentativas de pareamento atingido. ' +
+            'Verifique data/hora do aparelho e a conexão; depois execute novamente.'
+        )
+        this.shouldReconnect = false
+        return
+      }
+      this.pairingAttempts += 1
+
+      const custom = String(this.config.get('connection.customPairingCode') || '').trim()
+      const code = await this.sock.requestPairingCode(this.pairingPhone, custom || null)
+
+      const pretty = `${code.slice(0, 4)}-${code.slice(4)}`
+      log.info(`${t('app.pairingCodeTitle')}: ${pretty}`)
+      log.info(t('app.pairingHelp'))
+      log.info(t('app.waitingAuth'))
+      bus.emit(EVENTS.CONNECTION_PAIRING, { code: pretty })
+    } catch (error) {
+      log.warn(
+        `pedido de pareamento falhou (${error?.message ?? 'socket indisponível'}); ` +
+          'nova tentativa na próxima conexão'
+      )
+    } finally {
+      this.pairingInFlight = false
+    }
   }
 
   /** Registra os eventos do socket atual. */
@@ -140,6 +287,7 @@ export class Connection {
 
     if (connection === 'open') {
       this.attempts = 0
+      this.pairingAttempts = 0
       this.#setState('open')
       log.info(t('app.connected'))
       return
@@ -170,11 +318,20 @@ export class Connection {
         break
 
       case DisconnectReason.multideviceMismatch:
-        log.warn('incompatibilidade multidevice — reparando a sessão pode ser necessário')
+        log.warn('incompatibilidade multidevice — reparar a sessão pode ser necessário')
         break
 
       case DisconnectReason.restartRequired:
         log.info('reinicialização do socket solicitada pelo servidor')
+        break
+
+      case 405:
+        // Rejeição do servidor ao cliente (versão/registro/pedido recusado).
+        if (!this.auth.state.creds.registered) {
+          log.warn('conexão recusada pelo WhatsApp durante o pareamento — nova tentativa agendada')
+        } else {
+          log.warn('conexão recusada pelo WhatsApp (405)')
+        }
         break
 
       default:
@@ -213,42 +370,6 @@ export class Connection {
   }
 
   /**
-   * Fluxo de pareamento por código.
-   * Executado apenas quando ainda não há sessão registrada.
-   * @returns {Promise<void>}
-   */
-  async performPairingIfNeeded() {
-    if (this.auth.state.creds.registered) {
-      log.info(t('app.restoringSession'))
-      return
-    }
-
-    this.#setState('pairing')
-    log.info(t('app.generatingPairing'))
-
-    let phone = String(this.config.get('connection.phoneNumber') || '').replace(/\D/g, '')
-    if (!phone) {
-      phone = await this.#promptPhoneNumber()
-    }
-    if (!phone || phone.length < 8) {
-      throw new Error('número de telefone inválido para o Pairing Code')
-    }
-
-    // O websocket precisa estar aberto antes de solicitar o código.
-    await this.#waitForWebsocket()
-
-    // Código personalizado (config) ou aleatório (null força aleatório no fork).
-    const custom = String(this.config.get('connection.customPairingCode') || '').trim()
-    const code = await this.sock.requestPairingCode(phone, custom || null)
-
-    const pretty = `${code.slice(0, 4)}-${code.slice(4)}`
-    log.info(`${t('app.pairingCodeTitle')}: ${pretty}`)
-    log.info(t('app.pairingHelp'))
-    log.info(t('app.waitingAuth'))
-    bus.emit(EVENTS.CONNECTION_PAIRING, { code: pretty })
-  }
-
-  /**
    * Aguarda o websocket abrir (necessário antes do requestPairingCode).
    * @param {number} [timeoutMs=30000] Tempo máximo de espera.
    * @throws {Error} Quando a conexão não abre a tempo.
@@ -256,12 +377,17 @@ export class Connection {
   async #waitForWebsocket(timeoutMs = 30000) {
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
+      if (this.auth?.state?.creds?.registered) return
       const state = this.sock?.ws?.readyState
       if (state === 1) return // WebSocket.OPEN
-      if (state === 2 || state === 3) break // CLOSING/CLOSED
+      if (state === 2 || state === 3) {
+        // Socket atual morreu: espera a reconexão criar outro.
+        await sleep(500)
+        continue
+      }
       await sleep(150)
     }
-    throw new Error('não foi possível conectar ao WhatsApp para gerar o Pairing Code')
+    throw new Error('websocket não abriu a tempo para o pareamento')
   }
 
   /**

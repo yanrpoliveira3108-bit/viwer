@@ -63,6 +63,7 @@ export class DoctorService {
     await this.#checkConfig()
     await this.#checkDatabase()
     await this.#checkSession()
+    await this.#checkWaVersion()
     await this.#checkDisk()
     await this.#checkResources()
     await this.#checkTermux()
@@ -300,6 +301,37 @@ export class DoctorService {
         )
       )
     }
+  }
+
+  /**
+   * Fontes de versão do WhatsApp (o servidor rejeita versões defasadas).
+   * Se nenhuma estiver acessível, o Viewer usa a versão embutida na
+   * biblioteca — que pode ser recusada se estiver antiga.
+   */
+  async #checkWaVersion() {
+    const sources = [
+      'https://raw.githubusercontent.com/Itsukichann/Baileys/refs/heads/master/lib/Defaults/baileys-version.json',
+      'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/baileys-version.json',
+    ]
+    for (const url of sources) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(6000) })
+        if (response.ok) {
+          this.#add(new CheckResult('pass', 'Versão WA', 'fontes de versão acessíveis'))
+          return
+        }
+      } catch {
+        /* tenta a próxima fonte */
+      }
+    }
+    this.#add(
+      new CheckResult(
+        'warn',
+        'Versão WA',
+        'fontes de versão inacessíveis — será usada a versão embutida',
+        'Se o WhatsApp recusar a conexão (código 405), verifique a internet/rede'
+      )
+    )
   }
 
   /** Espaço em disco. */
