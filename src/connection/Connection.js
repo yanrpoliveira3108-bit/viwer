@@ -32,8 +32,11 @@ const log = createLogger('CONEXÃO')
 /** Máximo de tentativas de pareamento antes de orientar o usuário. */
 const MAX_PAIRING_ATTEMPTS = 3
 
-/** Espera para o handshake de registro terminar antes do pedido de código. */
-const PAIRING_GRACE_MS = 4000
+/** Tempo máximo aguardando o servidor aceitar o registro inicial. */
+const REGISTRATION_ACK_TIMEOUT_MS = 10000
+
+/** Assentamento após o reconhecimento do registro, antes de pedir o código. */
+const POST_ACK_SETTLE_MS = 500
 
 /** Validade aproximada do código exibido pelo WhatsApp no celular. */
 const PAIRING_CODE_TTL_MS = 70000
@@ -180,6 +183,10 @@ export class Connection {
     this.codePublishedForSocket = null
     /** Timer de expiração do código em exibição. @type {NodeJS.Timeout|null} */
     this.pairingExpiryTimer = null
+    /** Servidor já reconheceu o registro inicial desta sessão? */
+    this.registrationAcked = false
+    /** @type {Array<() => void>} Resolvedores aguardando o reconhecimento. */
+    this.regAckWaiters = []
   }
 
   /** @returns {object|null} Socket conectado (ou em conexão). */
@@ -312,6 +319,7 @@ export class Connection {
     const { default: makeWASocket } = api()
     this.#setState('connecting')
     this.#clearPairingExpiry()
+    this.registrationAcked = false
 
     // Sem sessão registrada, o handshake PRECISA seguir o caminho de
     // registro; creds.me residual (de tentativa de pareamento anterior)
@@ -401,10 +409,17 @@ export class Connection {
       log.info(t('app.generatingPairing'))
 
       await this.#waitForWebsocket()
-      // Deixa o registro inicial concluir antes do pedido de código.
-      await sleep(PAIRING_GRACE_MS)
+      // Espera o servidor ACEITAR o registro inicial (IQ pair-device).
+      // Pedir o código antes disso faz o servidor descartar o pedido e o
+      // celular responde "não foi possível conectar o dispositivo".
+      const acked = await this.#waitForRegistrationAck(REGISTRATION_ACK_TIMEOUT_MS)
       if (this.auth.state.creds.registered) return
       if (this.codePublishedForSocket === this.sock) return
+      if (!acked) {
+        log.warn('o servidor não confirmou o registro em 10s — pedindo o código mesmo assim')
+      } else {
+        await sleep(POST_ACK_SETTLE_MS)
+      }
 
       if (this.pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
         log.error(
@@ -426,6 +441,9 @@ export class Connection {
       log.info(`confira o número no celular: ${this.pairingPhonePretty}`)
       log.info(t('app.pairingHelp'))
       log.info(t('app.waitingAuth'))
+      // O fork emite 'connecting' depois que já marcamos 'pairing'; restaura
+      // o estado para o painel exibir "Aguardando pareamento".
+      this.#setState('pairing')
       bus.emit(EVENTS.CONNECTION_PAIRING, { code: pretty, phone: this.pairingPhonePretty })
       this.#armPairingExpiry()
     } catch (error) {
@@ -479,7 +497,79 @@ export class Connection {
       }
     })
 
+    // Diagnóstico do pareamento: o fork envia os IQs sem aguardar resposta,
+    // então recusas do servidor ficariam invisíveis. Aqui resumimos cada
+    // resposta recebida enquanto a sessão ainda não está registrada.
+    sock.ws.on('CB:iq', (stanza) => this.#onServerIq(stanza))
+
     sock.ev.on('connection.update', (update) => this.#onConnectionUpdate(update))
+  }
+
+  /**
+   * Resume e registra as respostas do servidor durante o pareamento.
+   * A chegada do IQ `pair-device` significa que o registro inicial foi
+   * aceito — só depois disso o pedido de código tem sessão válida.
+   * @param {{attrs?: object, content?: unknown}} stanza Estância recebida.
+   */
+  #onServerIq(stanza) {
+    try {
+      if (this.auth.state.creds.registered) return
+      const attrs = stanza?.attrs ?? {}
+      const children = Array.isArray(stanza?.content) ? stanza.content.map((c) => c?.tag) : []
+      const summary = `iq type=${attrs.type ?? '?'} filhos=[${children.join(',') || 'vazio'}]`
+
+      if (attrs.type === 'error' || attrs.error) {
+        log.warn(`servidor RECUSOU ${summary}${attrs.error ? ` (erro=${attrs.error})` : ''}`)
+        return
+      }
+      if (children.includes('pair-device')) {
+        log.info('registro aceito pelo servidor')
+        this.#resolveRegistrationAck()
+        return
+      }
+      if (children.includes('link_code_companion_reg')) {
+        log.info(`servidor respondeu ao pareamento (${summary})`)
+        this.#resolveRegistrationAck()
+        return
+      }
+      if (children.includes('pair-success')) {
+        log.info('pareamento confirmado pelo servidor')
+        return
+      }
+      if (attrs.type === 'result') {
+        log.info(`servidor confirmou ${summary}`)
+      }
+    } catch {
+      /* diagnóstico nunca pode quebrar o pareamento */
+    }
+  }
+
+  /** Libera quem aguarda o reconhecimento do registro. */
+  #resolveRegistrationAck() {
+    if (this.registrationAcked) return
+    this.registrationAcked = true
+    for (const resolve of this.regAckWaiters.splice(0)) resolve()
+  }
+
+  /**
+   * Aguarda o servidor aceitar o registro inicial desta sessão.
+   * @param {number} timeoutMs Tempo máximo de espera (segue mesmo sem ack).
+   * @returns {Promise<boolean>} `true` se o reconhecimento chegou a tempo.
+   */
+  #waitForRegistrationAck(timeoutMs) {
+    if (this.registrationAcked) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const wrapped = () => {
+        clearTimeout(timer)
+        resolve(this.registrationAcked)
+      }
+      const timer = setTimeout(() => {
+        this.regAckWaiters = this.regAckWaiters.filter((w) => w !== wrapped)
+        resolve(false)
+      }, timeoutMs)
+      timer.unref()
+      this.regAckWaiters.push(wrapped)
+    })
   }
 
   /**
