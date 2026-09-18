@@ -236,10 +236,34 @@ export class Connection {
     // Notifica módulos interessados (registro de eventos WA, plugins).
     bus.emit(EVENTS.CONNECTION_SOCKET, { sock: this.sock })
 
+    this.#armOpenWatchdog()
+
     // Pareamento: dispara para cada socket novo enquanto não registrado.
     if (!this.auth.state.creds.registered && this.pairingPhone) {
       void this.#attemptPairing()
     }
+  }
+
+  /**
+   * Vigia de abertura: se o websocket não abrir em 30s (rede instável,
+   * bloqueio temporário etc.), derruba o socket para o backoff de
+   * reconexão agir — evita ficar preso em "Conectando" para sempre.
+   */
+  #armOpenWatchdog() {
+    const sock = this.sock
+    const timer = setTimeout(() => {
+      if (this.sock !== sock) return // socket já substituído
+      if (this.state === 'open' || this.auth.state.creds.registered) return
+      const rawState = sock?.ws?.socket?.readyState ?? sock?.ws?.readyState
+      if (sock?.ws?.isOpen || rawState === 1) return // aberto (aguardando pareamento)
+      log.warn('a conexão não abriu em 30s — encerrando para tentar novamente')
+      try {
+        sock?.end(new Error('connect-timeout'))
+      } catch {
+        /* socket já encerrado */
+      }
+    }, 30000)
+    timer.unref()
   }
 
   /**
@@ -402,11 +426,14 @@ export class Connection {
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
       if (this.auth?.state?.creds?.registered) return
-      const state = this.sock?.ws?.readyState
-      if (state === 1) return // WebSocket.OPEN
-      if (state === 2 || state === 3) {
+      // O wrapper do fork expõe isOpen/isClosed; o readyState bruto fica
+      // no socket interno (ws.readyState não existe no wrapper).
+      const ws = this.sock?.ws
+      const rawState = ws?.socket?.readyState ?? ws?.readyState
+      if (ws?.isOpen || rawState === 1) return
+      if (ws?.isClosed || rawState === 3) {
         // Socket atual morreu: espera a reconexão criar outro.
-        await sleep(500)
+        await sleep(400)
         continue
       }
       await sleep(150)
