@@ -45,6 +45,9 @@ export const ansi = {
   home: `${ESC}H`,
   clearLine: `${ESC}2K`,
   up: (n = 1) => `${ESC}${n}A`,
+  /** Buffer alternativo (estilo htop): painel isolado do scrollback. */
+  altScreenOn: `${ESC}?1049h`,
+  altScreenOff: `${ESC}?1049l`,
 }
 
 /**

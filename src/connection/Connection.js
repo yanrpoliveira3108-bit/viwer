@@ -32,7 +32,7 @@ const log = createLogger('CONEXÃO')
 const MAX_PAIRING_ATTEMPTS = 3
 
 /** Espera para o handshake de registro terminar antes do pedido de código. */
-const PAIRING_GRACE_MS = 1500
+const PAIRING_GRACE_MS = 4000
 
 /**
  * Fontes da versão mais recente do WhatsApp, em ordem de preferência.
@@ -106,6 +106,9 @@ export class Connection {
     /** Número preparado para o pareamento (antes do socket existir). */
     this.pairingPhone = null
     this.pairingInFlight = false
+    /** Código estável usado em todas as tentativas (evita códigos novos
+     * invalidando o anterior a cada reconexão). */
+    this.stablePairingCode = null
   }
 
   /** @returns {object|null} Socket conectado (ou em conexão). */
@@ -158,6 +161,17 @@ export class Connection {
       throw new Error('número de telefone inválido para o Pairing Code')
     }
     this.pairingPhone = phone
+
+    // Um único código para todo o processo: reconexões não trocam o código
+    // enquanto o usuário o digita no celular.
+    const custom = String(this.config.get('connection.customPairingCode') || '').trim()
+    if (custom.length === 8) {
+      this.stablePairingCode = custom.toUpperCase()
+    } else {
+      const { bytesToCrockford } = api()
+      const { randomBytes } = await import('node:crypto')
+      this.stablePairingCode = bytesToCrockford(randomBytes(5)).toUpperCase()
+    }
   }
 
   /**
@@ -219,6 +233,13 @@ export class Connection {
   async #connect() {
     const { default: makeWASocket } = api()
     this.#setState('connecting')
+
+    // Sem sessão registrada, o handshake PRECISA seguir o caminho de
+    // registro; creds.me residual (de tentativa de pareamento anterior)
+    // faria o fork tentar login com identidade nunca pareada.
+    if (!this.auth.state.creds.registered && this.auth.state.creds.me) {
+      this.auth.state.creds.me = undefined
+    }
 
     const browser = this.config.get('connection.browser')
     this.sock = makeWASocket({
@@ -293,9 +314,7 @@ export class Connection {
       }
       this.pairingAttempts += 1
 
-      const custom = String(this.config.get('connection.customPairingCode') || '').trim()
-      const code = await this.sock.requestPairingCode(this.pairingPhone, custom || null)
-
+      const code = await this.sock.requestPairingCode(this.pairingPhone, this.stablePairingCode)
       const pretty = `${code.slice(0, 4)}-${code.slice(4)}`
       log.info(`${t('app.pairingCodeTitle')}: ${pretty}`)
       log.info(t('app.pairingHelp'))
