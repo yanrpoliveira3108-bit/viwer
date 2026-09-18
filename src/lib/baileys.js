@@ -149,7 +149,6 @@ function applyCompatibilityPatches(apiObj) {
     }
     const flags = getRegistrationPatchFlags()
     // Diagnóstico visível: confirma se o patch está ativo neste processo.
-    // eslint-disable-next-line no-console
     console.log(
       `[VIEWER] patch de compatibilidade do registro ativo ` +
         `(version=${flags.version ? 'sim' : 'não'}, historySyncConfig=${flags.history ? 'sim' : 'não'})`
