@@ -46,6 +46,25 @@ let cached = null
  */
 const COMPANION_DEVICE_VERSION = { primary: 10, secondary: 15, tertiary: 7 }
 
+/**
+ * Capacidades de sincronização de histórico anunciadas no registro.
+ * Espelha o objeto enviado pelo Baileys mantido (campos desconhecidos pelo
+ * protobuf do fork são ignorados na codificação, sem efeito colateral).
+ */
+const COMPANION_HISTORY_SYNC_CONFIG = {
+  storageQuotaMb: 10240,
+  inlineInitialPayloadInE2EeMsg: true,
+  supportCallLogHistory: false,
+  supportBotUserAgentChatHistory: true,
+  supportCagReactionsAndPolls: true,
+  supportBizHostedMsg: true,
+  supportRecentSyncChunkMessageCountTuning: true,
+  supportHostedGroupMsg: true,
+  supportFbidBotChatHistory: true,
+  supportMessageAssociation: true,
+  supportGroupHistory: false,
+}
+
 /** Patches de compatibilidade já aplicados? */
 let patchesApplied = false
 
@@ -98,6 +117,7 @@ function applyCompatibilityPatches(apiObj) {
         if (pairingData?.deviceProps && apiObj?.proto?.DeviceProps) {
           const props = apiObj.proto.DeviceProps.decode(pairingData.deviceProps)
           props.version = { ...COMPANION_DEVICE_VERSION }
+          props.historySyncConfig = { ...COMPANION_HISTORY_SYNC_CONFIG }
           pairingData.deviceProps = apiObj.proto.DeviceProps.encode(props).finish()
         }
       } catch {
