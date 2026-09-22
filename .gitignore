@@ -1,0 +1,18 @@
+# Dependências
+node_modules/
+
+# Estado do usuário (JAMAIS versionado — preservado em atualizações)
+session/
+data/
+logs/
+backups/
+tmp/
+viewer.config.json
+plugins/*
+!plugins/README.md
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
