@@ -142,13 +142,17 @@ export function registerEventBridge({ pipeline, cache, stats, config }) {
     if (!config.get('features.recoverOnReaction')) return
     if (!reaction?.key?.fromMe) return // apenas reações do número conectado
     if (!reaction.text) return // remoção de reação — nada a fazer
-    if (!key?.id || !key?.remoteJid) return
+    if (!key?.id) return
+    // Em alguns chats o reactionMessage.key chega sem remoteJid — a reação
+    // só pode apontar para o próprio chat onde ocorreu.
+    const targetJid = key.remoteJid || reaction.key?.remoteJid
+    if (!targetJid) return
 
-    log.info(`reação do número conectado detectada (${classifyChatJid(key.remoteJid)})`)
+    log.info(`reação do número conectado detectada (${classifyChatJid(targetJid)})`)
     void pipeline.recover({
       source: 'reaction',
-      chatJid: key.remoteJid,
-      targetKey: { remoteJid: key.remoteJid, id: key.id },
+      chatJid: targetJid,
+      targetKey: { remoteJid: targetJid, id: key.id },
     })
   }
 }
